@@ -1,0 +1,6 @@
+[package]
+name = "slatedb_hang_write_pressure_repro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
