@@ -1,15 +1,17 @@
 use object_store::path::Path;
 use rand::Rng;
 use rand::distr::Alphanumeric;
-use slatedb::config::CheckpointOptions;
+use slatedb::config::{
+    CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+};
 use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
-use slatedb::{Db, SlateDBError, WriteBatch, admin};
+use slatedb::{Db, SlateDBError, WriteBatch};
 use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), SlateDBError> {
-    console_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     // Using a local file system, as I am not sure if InMemory will cause issues as it may be latency bound.
     let object_store: Arc<dyn ObjectStore> =
@@ -17,31 +19,39 @@ async fn main() -> Result<(), SlateDBError> {
 
     let path = Path::from("slatedb-repro");
 
+    let compaction_options = CompactorOptions {
+        max_concurrent_compactions: 10,
+        poll_interval: Duration::from_secs(1),
+        ..Default::default()
+    };
+
+    let gc_directory_options = GarbageCollectorDirectoryOptions {
+        interval: Some(Duration::from_secs(1)),
+        min_age: Duration::from_secs(1),
+    };
+
+    let garbage_collection_options = GarbageCollectorOptions {
+        manifest_options: Some(gc_directory_options.clone()),
+        wal_options: Some(gc_directory_options.clone()),
+        compacted_options: Some(gc_directory_options),
+        ..Default::default()
+    };
+
+    let settings = slatedb::config::Settings {
+        compactor_options: Some(compaction_options),
+        garbage_collector_options: Some(garbage_collection_options),
+        ..Default::default()
+    };
+
     let kv_store = Arc::new(
         Db::builder(path.clone(), object_store.clone())
+            .with_settings(settings)
             .build()
             .await
             .expect("failed to open db"),
     );
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-
-    tokio::spawn(async move {
-        loop {
-            let _result = admin::create_checkpoint(
-                path.clone(),
-                object_store.clone(),
-                &CheckpointOptions {
-                    lifetime: Some(Duration::from_secs(10 * 60)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            println!("Checkpoint created");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
 
     loop {
         let kv_store = kv_store.clone();
@@ -68,6 +78,7 @@ async fn main() -> Result<(), SlateDBError> {
                 }
 
                 kv_store.write(batch).await.unwrap();
+                kv_store.get("something").await.unwrap();
             }
         });
     }
